@@ -59,14 +59,15 @@ def _extract_json(text: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-async def _ask(text: str) -> dict:
+async def ask_json(system: str, text: str) -> dict:
+    """Один запрос к LLM, ответ — JSON-объект (пустой dict, если модель вернула мусор)."""
     from openai import BadRequestError
 
     client = _get_client()
     kwargs = dict(
         model=os.environ["LLM_MODEL"],
-        messages=[{"role": "system", "content": SYSTEM}, {"role": "user", "content": text}],
-        temperature=0.3,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": text}],
+        temperature=0.2,
     )
     try:
         resp = await client.chat.completions.create(**kwargs, response_format={"type": "json_object"})
@@ -84,7 +85,7 @@ def _as_str(value) -> str:
 
 async def enrich(idea: Idea, text: str) -> Idea:
     try:
-        data = await _ask(text)
+        data = await ask_json(SYSTEM, text)
     except Exception as exc:
         logging.warning("LLM недоступен, карточка без дополнения: %s", exc)
         return idea

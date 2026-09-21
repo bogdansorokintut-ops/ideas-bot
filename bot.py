@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 import uuid
 
 from aiogram import Bot, Dispatcher, F
@@ -10,6 +11,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, User
 from dotenv import load_dotenv
 
+import assistant
 import llm
 from gsheet import IdeasSheet
 from models import Idea
@@ -30,9 +32,10 @@ dp = Dispatcher()
 pending: dict[str, Idea] = {}
 
 HELP = (
-    "Кидай идею игры текстом — запишу строкой в таблицу.\n\n"
+    "Кидай идею игры текстом — заведу лист в таблице.\n\n"
     f"{FORMAT_HINT}\n\n"
-    "В личке — просто пиши. В группе — /idea <текст>.\n"
+    "В личке — просто пиши. В группе — упомяни меня или ответь на моё сообщение.\n"
+    "Понимаю и обычные фразы: «запиши идею …», «добавь в «Хор» …», «статус Хора — прототип», «покажи идеи».\n\n"
     "/list — список идей со ссылками на их листы\n"
     "/sheet — ссылка на таблицу"
 )
@@ -92,19 +95,102 @@ async def cmd_idea(msg: Message, command: CommandObject):
     if not command.args:
         await msg.answer("Напиши идею после команды: /idea <текст>")
         return
-    await handle_idea(msg, command.args)
+    if not _allowed(msg.from_user):
+        await msg.answer("Этот бот приватный.")
+        return
+    await create_ideas(msg, command.args)
 
 
 @dp.message(F.text, F.chat.type == ChatType.PRIVATE)
 async def private_text(msg: Message):
-    await handle_idea(msg, msg.text)
+    await handle_text(msg, msg.text)
 
 
-async def handle_idea(msg: Message, text: str):
+@dp.message(F.text, F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}))
+async def group_text(msg: Message):
+    """В группе реагируем только на упоминание бота или ответ на его сообщение."""
+    me = await msg.bot.me()
+    mention = re.compile(rf"@{re.escape(me.username)}\b", re.I)
+    replied_to_me = bool(msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == me.id)
+    if not (mention.search(msg.text) or replied_to_me):
+        return
+    await handle_text(msg, mention.sub("", msg.text).strip())
+
+
+async def handle_text(msg: Message, text: str):
     if not _allowed(msg.from_user):
         await msg.answer("Этот бот приватный.")
         return
+    if not text:
+        await msg.answer(HELP)
+        return
+    if not llm.enabled():
+        await create_ideas(msg, assistant.strip_create_prefix(text))
+        return
 
+    await msg.bot.send_chat_action(msg.chat.id, "typing")
+    titles = [t for t, _ in await asyncio.to_thread(sheet.list_ideas)]
+    intent = await assistant.intent(text, titles)
+    action = intent.get("action")
+
+    if action == "create" or not action:
+        await create_ideas(msg, assistant.text_for_create(text, intent.get("text")))
+    elif action == "append":
+        await append_to_idea(msg, intent)
+    elif action == "set_status":
+        await set_status(msg, intent)
+    elif action == "list":
+        await cmd_list(msg)
+    else:
+        await msg.answer(intent.get("reply") or "Не понял. Напиши «запиши идею …» или «добавь … в идею …».")
+
+
+async def _resolve_idea(msg: Message, intent: dict) -> tuple[str, str] | None:
+    title = (intent.get("title") or "").strip()
+    found = await asyncio.to_thread(sheet.find_idea, title) if title else None
+    if found is None:
+        await msg.answer(f"Не нашёл идею «{title}». Посмотри /list.")
+    return found
+
+
+async def append_to_idea(msg: Message, intent: dict):
+    text = (intent.get("text") or "").strip()
+    if not text:
+        await msg.answer("Что именно добавить?")
+        return
+    found = await _resolve_idea(msg, intent)
+    if found is None:
+        return
+    tab, url = found
+    label = assistant.FIELD_LABELS.get(intent.get("field") or "")
+    if label:
+        await asyncio.to_thread(sheet.append_field, tab, label, text)
+    else:
+        label = "Заметки"
+        await asyncio.to_thread(sheet.add_note, tab, text)
+    await msg.answer(
+        f'✍️ <a href="{url}">{html.escape(tab)}</a> → {label}: {html.escape(text)}',
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+    )
+
+
+async def set_status(msg: Message, intent: dict):
+    status = (intent.get("text") or "").strip()
+    if not status:
+        await msg.answer("Какой статус поставить?")
+        return
+    found = await _resolve_idea(msg, intent)
+    if found is None:
+        return
+    tab, url = found
+    await asyncio.to_thread(sheet.write_field, tab, "Статус", status)
+    await msg.answer(
+        f'🏷 <a href="{url}">{html.escape(tab)}</a> → статус: {html.escape(status)}',
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+    )
+
+
+async def create_ideas(msg: Message, text: str):
     ideas = parse_ideas(text, author=_author(msg))
     if len(ideas) > 1:
         await msg.answer(f"Нашёл {len(ideas)} идеи — подтверди каждую отдельно:")

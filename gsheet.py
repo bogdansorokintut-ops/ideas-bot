@@ -6,9 +6,11 @@
 """
 
 import base64
+import difflib
 import json
 import os
 import re
+from datetime import date
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -251,3 +253,31 @@ class IdeasSheet:
         sheets = self._sheets()
         index_id = self._index(sheets)["sheetId"]
         return [(s["title"], self.tab_url(s["sheetId"])) for s in sheets if s["sheetId"] != index_id]
+
+    def find_idea(self, title: str) -> tuple[str, str] | None:
+        """(точное название листа, url) по названию — без учёта регистра, с допуском на опечатки."""
+        ideas = self.list_ideas()
+        by_lower = {t.lower(): (t, u) for t, u in ideas}
+        if title.lower() in by_lower:
+            return by_lower[title.lower()]
+        close = difflib.get_close_matches(title.lower(), list(by_lower), n=1, cutoff=0.6)
+        return by_lower[close[0]] if close else None
+
+    def read_field(self, tab: str, label: str) -> str:
+        rows = self._values(_card_cell(tab, label))
+        return rows[0][0] if rows and rows[0] else ""
+
+    def write_field(self, tab: str, label: str, value: str) -> None:
+        self._write(_card_cell(tab, label), [[value]], "RAW")
+
+    def append_field(self, tab: str, label: str, text: str) -> str:
+        """Дописывает текст к полю карточки, возвращает новое значение."""
+        current = self.read_field(tab, label)
+        value = f"{current} {text}".strip() if current else text
+        self.write_field(tab, label, value)
+        return value
+
+    def add_note(self, tab: str, text: str) -> None:
+        """Новая строка в конец листа идеи (после «Заметки» и предыдущих заметок)."""
+        used = len(self._values(f"{_q(tab)}!A:B"))
+        self._write(f"{_q(tab)}!A{used + 1}", [[date.today().isoformat(), text]], "RAW")
