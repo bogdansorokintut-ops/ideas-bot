@@ -22,7 +22,7 @@ DEFAULT_STATUS = "идея"
 
 # Карточка на листе идеи: A1 — название, дальше с 3-й строки пары «метка | значение».
 CARD_FIRST_ROW = 3
-CARD_FIELDS = ["Описание", "Питч", "Жанр", "Core loop", "Хук", "Референсы", "Автор", "Дата", "Статус"]
+CARD_FIELDS = ["Описание", "Питч", "Жанр", "Core loop", "Хук", "Референсы", "Развитие", "Автор", "Дата", "Статус"]
 NOTES_LABEL = "Заметки"
 
 MAX_TAB_TITLE = 90  # лимит Sheets — 100, оставляем место под « (2)»
@@ -60,12 +60,14 @@ def card_rows(idea: Idea) -> list[list[str]]:
         "Core loop": idea.core_loop,
         "Хук": idea.hook,
         "Референсы": idea.references,
+        "Развитие": idea.growth,
         "Автор": idea.author,
         "Дата": idea.created.isoformat(),
         "Статус": DEFAULT_STATUS,
     }
     rows = [[idea.title], []]
     rows += [[label, values[label]] for label in CARD_FIELDS]
+    rows += [[label, value] for label, value in idea.extras.items()]
     rows += [[], [NOTES_LABEL, ""]]
     return rows
 
@@ -113,9 +115,9 @@ def index_format_requests(sheet_id: int) -> list[dict]:
     ]
 
 
-def card_format_requests(sheet_id: int) -> list[dict]:
-    """Лист идеи: крупное название, жирные метки, широкая колонка значений."""
-    last_label_row = CARD_FIRST_ROW + len(CARD_FIELDS) + 1  # + пустая строка + «Заметки»
+def card_format_requests(sheet_id: int, n_rows: int) -> list[dict]:
+    """Лист идеи: крупное название, жирные метки (до строки «Заметки» включительно), широкая колонка значений."""
+    last_label_row = n_rows
     return [
         {
             "repeatCell": {
@@ -231,8 +233,9 @@ class IdeasSheet:
         resp = self._batch([{"addSheet": {"properties": {"title": tab}}}])
         tab_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
 
-        self._write(f"{_q(tab)}!A1", card_rows(idea), "RAW")
-        self._batch(card_format_requests(tab_id))
+        rows = card_rows(idea)
+        self._write(f"{_q(tab)}!A1", rows, "RAW")
+        self._batch(card_format_requests(tab_id, len(rows)))
 
         self.svc.spreadsheets().values().append(
             spreadsheetId=self.id,

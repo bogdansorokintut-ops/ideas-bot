@@ -11,8 +11,13 @@ class Idea:
     core_loop: str = ""
     hook: str = ""
     references: str = ""
+    growth: str = ""
+    # Метки, которых нет среди полей выше: «Игроков: 4–8», «Платформа: …». Идут отдельными строками на лист.
+    extras: dict[str, str] = field(default_factory=dict)
     author: str = ""
     created: date = field(default_factory=date.today)
+    # Исходный текст блока — только для LLM, в таблицу не пишется
+    raw: str = field(default="", compare=False, repr=False)
 
     def fields(self) -> list[tuple[str, str]]:
         """Пары (метка, значение) для карточки; пустые поля пропускаются."""
@@ -23,6 +28,8 @@ class Idea:
             ("Core loop", self.core_loop),
             ("Хук", self.hook),
             ("Референсы", self.references),
+            ("Развитие", self.growth),
+            *self.extras.items(),
             ("Автор", f"{self.author} · {self.created:%d.%m.%Y}"),
         ]
         return [(k, v.strip()) for k, v in rows if v and v.strip()]
@@ -50,6 +57,8 @@ class Idea:
                     pass
             elif label in PREVIEW_LABELS:
                 setattr(idea, PREVIEW_LABELS[label], value.strip())
+            else:
+                idea.extras[label] = value.strip()
         return idea
 
 
@@ -60,4 +69,5 @@ PREVIEW_LABELS = {
     "Core loop": "core_loop",
     "Хук": "hook",
     "Референсы": "references",
+    "Развитие": "growth",
 }

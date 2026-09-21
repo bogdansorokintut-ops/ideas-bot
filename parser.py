@@ -1,19 +1,29 @@
-"""Текст сообщения → Idea. Без LLM, по простым правилам.
+"""Текст сообщения → список Idea. Без LLM, по простым правилам.
 
-Первая строка — название. Остальные строки вида `метка: значение` уходят в поля,
-всё прочее — в описание.
+Идеи разделяются пустой строкой. Внутри идеи первая строка — название,
+строки вида `метка: значение` уходят в поля (см. LABELS), незнакомые метки — в extras,
+всё остальное — в описание. Блок, который начинается не с названия, считается
+продолжением предыдущей идеи.
 """
+
+import re
 
 from models import Idea
 
 MAX_TITLE = 60
+MAX_LABEL_WORDS = 4
 
 LABELS = {
+    "описание": "description", "суть": "description", "идея": "description", "концепт": "description",
+    "о чём": "description", "о чем": "description",
     "питч": "pitch", "pitch": "pitch",
-    "жанр": "genre", "genre": "genre",
+    "жанр": "genre", "genre": "genre", "теги": "genre",
     "loop": "core_loop", "core loop": "core_loop", "луп": "core_loop",
-    "хук": "hook", "hook": "hook",
+    "механика": "core_loop", "механика-изюминка": "core_loop", "изюминка": "core_loop", "геймплей": "core_loop",
+    "хук": "hook", "hook": "hook", "фишка": "hook",
+    "почему это вирально": "hook", "почему вирально": "hook", "вирально": "hook",
     "референсы": "references", "рефы": "references", "refs": "references", "похоже на": "references",
+    "развитие": "growth", "дальше": "growth", "потенциал": "growth", "расширение": "growth",
 }
 
 FORMAT_HINT = (
@@ -21,29 +31,69 @@ FORMAT_HINT = (
     "жанр: roguelite, management\n"
     "хук: корабль разбивается о скалы в свете маяка\n"
     "loop: ночь — заманиваешь, утро — лутаешь\n"
-    "рефы: Dredge, Reigns"
+    "рефы: Dredge, Reigns\n"
+    "развитие: мультиплеер, сезоны\n\n"
+    "Несколько идей — через пустую строку. Незнакомые метки («Игроков: 4–8») тоже сохранятся."
 )
 
 
-def parse_idea(text: str, author: str) -> Idea:
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    first, rest = lines[0], lines[1:]
+def _split_label(line: str) -> tuple[str, str] | None:
+    """«Метка: значение» → (метка, значение), иначе None. Ссылки и длинные «метки» не считаются."""
+    key, sep, value = line.partition(":")
+    key, value = key.strip(), value.strip()
+    if not sep or not key or not value or value.startswith("//"):
+        return None
+    if len(key.split()) > MAX_LABEL_WORDS or len(key) > 40:
+        return None
+    return key, value
 
-    if len(first) <= MAX_TITLE:
-        title = first
-        desc_lines = []
+
+def _is_title(line: str) -> bool:
+    return len(line) <= MAX_TITLE and _split_label(line) is None
+
+
+def _absorb(idea: Idea, lines: list[str]) -> None:
+    for line in lines:
+        parsed = _split_label(line)
+        if parsed is None:
+            idea.description = f"{idea.description} {line}".strip()
+            continue
+        key, value = parsed
+        name = LABELS.get(" ".join(key.lower().split()))
+        if name:
+            current = getattr(idea, name)
+            setattr(idea, name, f"{current} {value}".strip() if current else value)
+        else:
+            idea.extras[key] = f"{idea.extras[key]} {value}".strip() if key in idea.extras else value
+
+
+def _new_idea(lines: list[str], author: str, raw: str) -> Idea:
+    first, rest = lines[0], lines[1:]
+    if _is_title(first):
+        idea = Idea(title=first, author=author, raw=raw)
     else:
         # Длинная первая строка — это не название, а сама идея
-        title = first[: MAX_TITLE - 1].rsplit(" ", 1)[0] + "…"
-        desc_lines = [first]
+        cut = first[: MAX_TITLE - 1].rsplit(" ", 1)[0] + "…" if len(first) > MAX_TITLE else first
+        idea = Idea(title=cut, author=author, raw=raw)
+        rest = [first, *rest]
+    _absorb(idea, rest)
+    return idea
 
-    fields: dict[str, str] = {}
-    for line in rest:
-        key, sep, value = line.partition(":")
-        name = LABELS.get(key.strip().lower())
-        if sep and name and value.strip():
-            fields[name] = value.strip()
+
+def parse_ideas(text: str, author: str) -> list[Idea]:
+    ideas: list[Idea] = []
+    for chunk in re.split(r"\n\s*\n", text.strip()):
+        lines = [line.strip() for line in chunk.splitlines() if line.strip()]
+        if not lines:
+            continue
+        if ideas and not _is_title(lines[0]):
+            _absorb(ideas[-1], lines)
+            ideas[-1].raw = f"{ideas[-1].raw}\n\n{chunk.strip()}"
         else:
-            desc_lines.append(line)
+            ideas.append(_new_idea(lines, author, chunk.strip()))
+    return ideas
 
-    return Idea(title=title, description=" ".join(desc_lines), author=author, **fields)
+
+def parse_idea(text: str, author: str) -> Idea:
+    """Первая идея из текста — для простых случаев и тестов."""
+    return parse_ideas(text, author)[0]

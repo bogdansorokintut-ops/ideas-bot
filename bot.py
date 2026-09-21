@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 import llm
 from gsheet import IdeasSheet
 from models import Idea
-from parser import FORMAT_HINT, parse_idea
+from parser import FORMAT_HINT, parse_ideas
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -105,13 +105,22 @@ async def handle_idea(msg: Message, text: str):
         await msg.answer("Этот бот приватный.")
         return
 
-    idea = parse_idea(text, author=_author(msg))
-    if llm.enabled():
-        await msg.bot.send_chat_action(msg.chat.id, "typing")
-        idea = await llm.enrich(idea, text)
-    pid = uuid.uuid4().hex[:8]
-    pending[pid] = idea
-    await msg.answer(idea.preview(), reply_markup=_keyboard(pid))
+    ideas = parse_ideas(text, author=_author(msg))
+    if len(ideas) > 1:
+        await msg.answer(f"Нашёл {len(ideas)} идеи — подтверди каждую отдельно:")
+
+    for idea in ideas:
+        if llm.enabled():
+            await msg.bot.send_chat_action(msg.chat.id, "typing")
+            idea = await llm.enrich(idea, idea.raw)
+        pid = uuid.uuid4().hex[:8]
+        pending[pid] = idea
+        await msg.answer(_fit(idea.preview()), reply_markup=_keyboard(pid))
+
+
+def _fit(text: str, limit: int = 4000) -> str:
+    """Telegram не принимает сообщения длиннее 4096 символов."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 @dp.callback_query(F.data.startswith("save:"))
@@ -129,7 +138,7 @@ async def on_save(cb: CallbackQuery):
         logging.exception("append failed")
         await cb.answer("Не удалось записать в таблицу", show_alert=True)
         return
-    await cb.message.edit_text(f"{idea.preview()}\n\n✅ Записано → {tab_url}")
+    await cb.message.edit_text(_fit(f"{idea.preview()}\n\n✅ Записано → {tab_url}"))
     await cb.answer()
 
 
