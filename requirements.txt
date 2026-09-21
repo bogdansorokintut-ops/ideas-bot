@@ -1,0 +1,5 @@
+aiogram>=3.13
+google-api-python-client>=2.140
+google-auth>=2.34
+python-dotenv>=1.0
+openai>=1.50

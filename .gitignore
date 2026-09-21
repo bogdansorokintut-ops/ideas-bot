@@ -1,0 +1,8 @@
+.env
+deploy.env
+credentials.json
+credentials.oneline.txt
+bot.log
+*.zip
+.venv/
+__pycache__/
