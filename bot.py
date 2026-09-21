@@ -40,6 +40,8 @@ HELP = (
     "/sheet — ссылка на таблицу"
 )
 
+ACK = "⏳ Принял, разбираюсь…"
+
 
 def _allowed(user: User | None) -> bool:
     if not ALLOWED_USERS:
@@ -70,6 +72,37 @@ def _keyboard(pid: str) -> InlineKeyboardMarkup:
     )
 
 
+def _fit(text: str, limit: int = 4000) -> str:
+    """Telegram не принимает сообщения длиннее 4096 символов."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} {one}"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} {few}"
+    return f"{n} {many}"
+
+
+def _link(title: str, url: str) -> str:
+    return f'<a href="{url}">{html.escape(title)}</a>'
+
+
+def _footer(tab_url: str | None = None) -> str:
+    """Ссылки в конец ответа: лист идеи (если есть) и вся таблица."""
+    parts = ([_link("Открыть лист", tab_url)] if tab_url else []) + [_link("Таблица", sheet.url)]
+    return "\n\n🔗 " + " · ".join(parts)
+
+
+async def _finish(ack: Message, text: str) -> None:
+    """Отбивка «принял» превращается в результат."""
+    await ack.edit_text(_fit(text), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+# ---------- команды ----------
+
+
 @dp.message(CommandStart())
 async def cmd_start(msg: Message):
     await msg.answer(HELP)
@@ -80,14 +113,16 @@ async def cmd_sheet(msg: Message):
     await msg.answer(sheet.url)
 
 
-@dp.message(Command("list"))
-async def cmd_list(msg: Message):
+async def _list_text() -> str:
     ideas = await asyncio.to_thread(sheet.list_ideas)
     if not ideas:
-        await msg.answer("Пока пусто.")
-        return
-    lines = [f'{i}. <a href="{url}">{html.escape(title)}</a>' for i, (title, url) in enumerate(ideas, 1)]
-    await msg.answer("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        return "Пока пусто."
+    return "\n".join(f"{i}. {_link(title, url)}" for i, (title, url) in enumerate(ideas, 1)) + _footer()
+
+
+@dp.message(Command("list"))
+async def cmd_list(msg: Message):
+    await msg.answer(await _list_text(), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 @dp.message(Command("idea"))
@@ -98,7 +133,11 @@ async def cmd_idea(msg: Message, command: CommandObject):
     if not _allowed(msg.from_user):
         await msg.answer("Этот бот приватный.")
         return
-    await create_ideas(msg, command.args)
+    ack = await msg.reply(ACK)
+    await create_ideas(msg, ack, command.args)
+
+
+# ---------- свободный текст ----------
 
 
 @dp.message(F.text, F.chat.type == ChatType.PRIVATE)
@@ -111,7 +150,9 @@ async def group_text(msg: Message):
     """В группе реагируем только на упоминание бота или ответ на его сообщение."""
     me = await msg.bot.me()
     mention = re.compile(rf"@{re.escape(me.username)}\b", re.I)
-    replied_to_me = bool(msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == me.id)
+    replied_to_me = bool(
+        msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == me.id
+    )
     if not (mention.search(msg.text) or replied_to_me):
         return
     await handle_text(msg, mention.sub("", msg.text).strip())
@@ -124,41 +165,50 @@ async def handle_text(msg: Message, text: str):
     if not text:
         await msg.answer(HELP)
         return
+
+    ack = await msg.reply(ACK)
+    try:
+        await _dispatch(msg, ack, text)
+    except Exception as exc:
+        logging.exception("handle_text failed")
+        await _finish(ack, f"❌ Не получилось: {html.escape(str(exc)[:300])}")
+
+
+async def _dispatch(msg: Message, ack: Message, text: str):
     if not llm.enabled():
-        await create_ideas(msg, assistant.strip_create_prefix(text))
+        await create_ideas(msg, ack, assistant.strip_create_prefix(text))
         return
 
-    await msg.bot.send_chat_action(msg.chat.id, "typing")
     titles = [t for t, _ in await asyncio.to_thread(sheet.list_ideas)]
     intent = await assistant.intent(text, titles)
     action = intent.get("action")
 
     if action == "create" or not action:
-        await create_ideas(msg, assistant.text_for_create(text, intent.get("text")))
+        await create_ideas(msg, ack, assistant.text_for_create(text, intent.get("text")))
     elif action == "append":
-        await append_to_idea(msg, intent)
+        await append_to_idea(ack, intent)
     elif action == "set_status":
-        await set_status(msg, intent)
+        await set_status(ack, intent)
     elif action == "list":
-        await cmd_list(msg)
+        await _finish(ack, await _list_text())
     else:
-        await msg.answer(intent.get("reply") or "Не понял. Напиши «запиши идею …» или «добавь … в идею …».")
+        await _finish(ack, html.escape(intent.get("reply") or "Не понял. Напиши «запиши идею …» или «добавь … в идею …»."))
 
 
-async def _resolve_idea(msg: Message, intent: dict) -> tuple[str, str] | None:
+async def _resolve_idea(ack: Message, intent: dict) -> tuple[str, str] | None:
     title = (intent.get("title") or "").strip()
     found = await asyncio.to_thread(sheet.find_idea, title) if title else None
     if found is None:
-        await msg.answer(f"Не нашёл идею «{title}». Посмотри /list.")
+        await _finish(ack, f"🤷 Не нашёл идею «{html.escape(title)}». Посмотри /list.")
     return found
 
 
-async def append_to_idea(msg: Message, intent: dict):
+async def append_to_idea(ack: Message, intent: dict):
     text = (intent.get("text") or "").strip()
     if not text:
-        await msg.answer("Что именно добавить?")
+        await _finish(ack, "Что именно добавить?")
         return
-    found = await _resolve_idea(msg, intent)
+    found = await _resolve_idea(ack, intent)
     if found is None:
         return
     tab, url = found
@@ -168,45 +218,39 @@ async def append_to_idea(msg: Message, intent: dict):
     else:
         label = "Заметки"
         await asyncio.to_thread(sheet.add_note, tab, text)
-    await msg.answer(
-        f'✍️ <a href="{url}">{html.escape(tab)}</a> → {label}: {html.escape(text)}',
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
-    )
+    await _finish(ack, f"✍️ {_link(tab, url)} → {label}: {html.escape(text)}{_footer(url)}")
 
 
-async def set_status(msg: Message, intent: dict):
+async def set_status(ack: Message, intent: dict):
     status = (intent.get("text") or "").strip()
     if not status:
-        await msg.answer("Какой статус поставить?")
+        await _finish(ack, "Какой статус поставить?")
         return
-    found = await _resolve_idea(msg, intent)
+    found = await _resolve_idea(ack, intent)
     if found is None:
         return
     tab, url = found
     await asyncio.to_thread(sheet.write_field, tab, "Статус", status)
-    await msg.answer(
-        f'🏷 <a href="{url}">{html.escape(tab)}</a> → статус: {html.escape(status)}',
-        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
-    )
+    await _finish(ack, f"🏷 {_link(tab, url)} → статус: {html.escape(status)}{_footer(url)}")
 
 
-async def create_ideas(msg: Message, text: str):
+async def create_ideas(msg: Message, ack: Message, text: str):
     ideas = parse_ideas(text, author=_author(msg))
-    if len(ideas) > 1:
-        await msg.answer(f"Нашёл {len(ideas)} идеи — подтверди каждую отдельно:")
+    if not ideas:
+        await _finish(ack, "Не нашёл текста идеи.")
+        return
 
+    if llm.enabled():
+        ideas = [await llm.enrich(idea, idea.raw) for idea in ideas]
+
+    await _finish(ack, f"📝 Разобрал {_plural(len(ideas), 'идею', 'идеи', 'идей')} — подтверди:{_footer()}")
     for idea in ideas:
-        if llm.enabled():
-            await msg.bot.send_chat_action(msg.chat.id, "typing")
-            idea = await llm.enrich(idea, idea.raw)
         pid = uuid.uuid4().hex[:8]
         pending[pid] = idea
         await msg.answer(_fit(idea.preview()), reply_markup=_keyboard(pid))
 
 
-def _fit(text: str, limit: int = 4000) -> str:
-    """Telegram не принимает сообщения длиннее 4096 символов."""
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+# ---------- кнопки ----------
 
 
 @dp.callback_query(F.data.startswith("save:"))
@@ -214,18 +258,25 @@ async def on_save(cb: CallbackQuery):
     if not _allowed(cb.from_user):
         await cb.answer("Этот бот приватный.", show_alert=True)
         return
-    idea = pending.pop(cb.data.split(":", 1)[1], None) or Idea.from_preview(cb.message.text)
+    pid = cb.data.split(":", 1)[1]
+    idea = pending.pop(pid, None) or Idea.from_preview(cb.message.text)
     if idea is None:
         await cb.answer("Не смог восстановить карточку — отправь идею заново", show_alert=True)
         return
+    await cb.answer("Записываю…")
     try:
         tab_url = await asyncio.to_thread(sheet.append_idea, idea)
-    except Exception:
+    except Exception as exc:
         logging.exception("append failed")
-        await cb.answer("Не удалось записать в таблицу", show_alert=True)
+        pending[pid] = idea  # кнопки остаются — можно нажать ещё раз
+        await cb.message.edit_text(
+            _fit(f"{idea.preview()}\n\n❌ Не удалось записать: {str(exc)[:200]}"), reply_markup=_keyboard(pid)
+        )
         return
-    await cb.message.edit_text(_fit(f"{idea.preview()}\n\n✅ Записано → {tab_url}"))
-    await cb.answer()
+    await cb.message.edit_text(
+        _fit(f"{html.escape(idea.preview())}\n\n✅ Записано{_footer(tab_url)}"),
+        parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+    )
 
 
 @dp.callback_query(F.data.startswith("cancel:"))
