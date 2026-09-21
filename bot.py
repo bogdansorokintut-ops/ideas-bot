@@ -7,6 +7,7 @@ import uuid
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ChatType, ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, User
 from dotenv import load_dotenv
@@ -95,6 +96,14 @@ def _footer(tab_url: str | None = None) -> str:
     return "\n\n🔗 " + " · ".join(parts)
 
 
+async def _ack(msg: Message) -> Message:
+    """Отбивка «принял» реплаем; если исходное сообщение уже нельзя цитировать — обычным сообщением."""
+    try:
+        return await msg.reply(ACK)
+    except TelegramBadRequest:
+        return await msg.answer(ACK)
+
+
 async def _finish(ack: Message, text: str) -> None:
     """Отбивка «принял» превращается в результат."""
     await ack.edit_text(_fit(text), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
@@ -133,7 +142,7 @@ async def cmd_idea(msg: Message, command: CommandObject):
     if not _allowed(msg.from_user):
         await msg.answer("Этот бот приватный.")
         return
-    ack = await msg.reply(ACK)
+    ack = await _ack(msg)
     await create_ideas(msg, ack, command.args)
 
 
@@ -166,7 +175,7 @@ async def handle_text(msg: Message, text: str):
         await msg.answer(HELP)
         return
 
-    ack = await msg.reply(ACK)
+    ack = await _ack(msg)
     try:
         await _dispatch(msg, ack, text)
     except Exception as exc:
