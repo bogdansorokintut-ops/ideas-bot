@@ -19,8 +19,26 @@ from models import Idea
 from parser import FORMAT_HINT, parse_ideas
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("ideas-bot")
 
+
+def _check_env() -> None:
+    """Понятная ошибка в логах хостинга вместо KeyError где-то в глубине."""
+    missing = [k for k in ("BOT_TOKEN", "GOOGLE_SHEET_ID") if not os.getenv(k)]
+    if not os.getenv("GOOGLE_CREDENTIALS_JSON") and not os.path.exists(os.getenv("GOOGLE_CREDENTIALS", "credentials.json")):
+        missing.append("GOOGLE_CREDENTIALS_JSON (или файл credentials.json)")
+    if missing:
+        raise SystemExit(f"Не заданы переменные окружения: {', '.join(missing)}")
+    log.info(
+        "env ok: sheet=%s, allowed=%s, llm=%s",
+        os.environ["GOOGLE_SHEET_ID"][:8] + "…",
+        os.getenv("ALLOWED_USERS") or "(все)",
+        os.getenv("LLM_MODEL") or "выключен",
+    )
+
+
+_check_env()
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 # Юзернеймы (без @) и/или числовые id, через запятую. Пусто = пускать всех.
 ALLOWED_USERS = {x.strip().lstrip("@").lower() for x in os.getenv("ALLOWED_USERS", "").split(",") if x.strip()}
@@ -42,6 +60,13 @@ HELP = (
 )
 
 ACK = "⏳ Принял, разбираюсь…"
+
+# Telegram режет сообщения длиннее 4096 символов на несколько подряд идущих. Длинный кусок
+# придерживаем и ждём продолжение от того же человека, чтобы разобрать всё вместе —
+# иначе название идеи остаётся в одном куске, а её текст в другом.
+SPLIT_HINT = 2000  # кусок короче этого — точно не порезанное сообщение, не ждём
+SPLIT_WAIT = 2.0  # секунд тишины после последнего куска
+_parts: dict[tuple[int, int], list[str]] = {}  # (chat, user) → куски, которые ещё копятся
 
 
 def _allowed(user: User | None) -> bool:
@@ -109,6 +134,42 @@ async def _finish(ack: Message, text: str) -> None:
     await ack.edit_text(_fit(text), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
+def _parts_key(msg: Message) -> tuple[int, int]:
+    return msg.chat.id, msg.from_user.id if msg.from_user else 0
+
+
+def _take_continuation(msg: Message, text: str) -> bool:
+    """Если от этого человека уже копится длинное сообщение — кусок туда, отдельно не обрабатываем."""
+    parts = _parts.get(_parts_key(msg))
+    if parts is None:
+        return False
+    parts.append(text)
+    return True
+
+
+async def _collect_parts(msg: Message, text: str) -> str:
+    """Ждёт, пока куски перестанут приходить, и склеивает их."""
+    key = _parts_key(msg)
+    parts = _parts[key] = [text]
+    while True:
+        n = len(parts)
+        await asyncio.sleep(SPLIT_WAIT)
+        if len(parts) == n:
+            break
+    del _parts[key]
+    return _join_parts(parts)
+
+
+def _join_parts(parts: list[str]) -> str:
+    text = parts[0]
+    for part in parts[1:]:
+        # Кусок с маленькой буквы — резали посреди предложения, склеиваем пробелом.
+        # Иначе резали по переносу строки: разделяем как абзацы — блок без названия
+        # парсер и так приклеит к предыдущей идее.
+        text += (" " if part[:1].islower() else "\n\n") + part
+    return text
+
+
 # ---------- команды ----------
 
 
@@ -162,7 +223,7 @@ async def group_text(msg: Message):
     replied_to_me = bool(
         msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == me.id
     )
-    if not (mention.search(msg.text) or replied_to_me):
+    if not (mention.search(msg.text) or replied_to_me or _parts_key(msg) in _parts):
         return
     await handle_text(msg, mention.sub("", msg.text).strip())
 
@@ -171,12 +232,16 @@ async def handle_text(msg: Message, text: str):
     if not _allowed(msg.from_user):
         await msg.answer("Этот бот приватный.")
         return
+    if _take_continuation(msg, text):
+        return
     if not text:
         await msg.answer(HELP)
         return
 
     ack = await _ack(msg)
     try:
+        if len(text) >= SPLIT_HINT:
+            text = await _collect_parts(msg, text)
         await _dispatch(msg, ack, text)
     except Exception as exc:
         logging.exception("handle_text failed")
@@ -193,7 +258,7 @@ async def _dispatch(msg: Message, ack: Message, text: str):
     action = intent.get("action")
 
     if action == "create" or not action:
-        await create_ideas(msg, ack, assistant.text_for_create(text, intent.get("text")))
+        await create_ideas(msg, ack, assistant.text_for_create(text, intent.get("intro")))
     elif action == "append":
         await append_to_idea(ack, intent)
     elif action == "set_status":
@@ -249,14 +314,20 @@ async def create_ideas(msg: Message, ack: Message, text: str):
         await _finish(ack, "Не нашёл текста идеи.")
         return
 
+    not_enriched: set[int] = set()
     if llm.enabled():
-        ideas = [await llm.enrich(idea, idea.raw) for idea in ideas]
+        for n, idea in enumerate(ideas):
+            if not await llm.enrich(idea, idea.raw):
+                not_enriched.add(n)
 
     await _finish(ack, f"📝 Разобрал {_plural(len(ideas), 'идею', 'идеи', 'идей')} — подтверди:{_footer()}")
-    for idea in ideas:
+    for n, idea in enumerate(ideas):
         pid = uuid.uuid4().hex[:8]
         pending[pid] = idea
-        await msg.answer(_fit(idea.preview()), reply_markup=_keyboard(pid))
+        text = idea.preview()
+        if n in not_enriched:  # без «: », чтобы Idea.from_preview не принял строку за поле
+            text += "\n\n⚠️ LLM не ответил (лимит или сеть) — пустые поля не дополнены"
+        await msg.answer(_fit(text), reply_markup=_keyboard(pid))
 
 
 # ---------- кнопки ----------
@@ -296,9 +367,15 @@ async def on_cancel(cb: CallbackQuery):
 
 
 async def main():
-    await asyncio.to_thread(sheet.ensure_headers)
+    try:
+        await asyncio.to_thread(sheet.ensure_headers)
+    except Exception as exc:
+        raise SystemExit(f"Нет доступа к таблице: {exc}") from exc
+    log.info("таблица доступна: %s", sheet.url)
     bot = Bot(BOT_TOKEN)
     await bot.delete_webhook()  # на случай, если раньше стоял webhook
+    me = await bot.me()
+    log.info("запускаю polling как @%s", me.username)
     await dp.start_polling(bot)
 
 

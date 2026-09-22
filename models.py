@@ -18,6 +18,8 @@ class Idea:
     created: date = field(default_factory=date.today)
     # Исходный текст блока — только для LLM, в таблицу не пишется
     raw: str = field(default="", compare=False, repr=False)
+    # Название придумано парсером (в блоке не было строки с названием) — LLM может заменить
+    auto_title: bool = field(default=False, compare=False)
 
     def fields(self) -> list[tuple[str, str]]:
         """Пары (метка, значение) для карточки; пустые поля пропускаются."""

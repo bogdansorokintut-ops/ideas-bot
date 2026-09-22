@@ -5,11 +5,12 @@ import re
 import llm
 
 SYSTEM = """Ты — ассистент бэклога идей для игр в Telegram. Пользователь пишет свободным текстом.
-Определи намерение и ответь одним JSON-объектом с ключами action, title, field, text, reply.
+Определи намерение и ответь одним JSON-объектом с ключами action, title, field, text, intro, reply.
 
 action:
-  "create"     — записать новую идею (или несколько). В text скопируй текст идеи ДОСЛОВНО,
-                 с переносами строк, убрав только вступление вроде «запиши идею».
+  "create"     — записать новую идею (или несколько). Текст идеи НЕ переписывай и не копируй.
+                 В intro положи вступление, которое стоит В НАЧАЛЕ сообщения и не относится к идее
+                 («запиши идею:», «вот ещё мысль —»), дословно; если сообщение и есть идея — null.
   "append"     — дополнить существующую идею. title — точное название из списка ниже.
                  field — куда: description, pitch, genre, core_loop, hook, references, growth
                  или notes (если не сказано явно — notes). text — что добавить, дословно.
@@ -52,9 +53,14 @@ async def intent(text: str, titles: list[str]) -> dict:
     return data if isinstance(data, dict) and data.get("action") else {}
 
 
-def text_for_create(original: str, suggested: str | None) -> str:
-    """Текст идеи для парсера: версия от LLM, если она не потеряла содержимое, иначе оригинал без вступления."""
-    fallback = strip_create_prefix(original)
-    if suggested and len(suggested) >= 0.6 * len(fallback):
-        return suggested
-    return fallback
+def text_for_create(original: str, intro: str | None) -> str:
+    """Текст идеи для парсера: оригинал без вступления. Вступление называет LLM, но режем оригинал сами —
+    просить модель переписать идею «дословно» нельзя, на длинных сообщениях она теряет строки."""
+    text = original.strip()
+    words = (intro or "").split()
+    norm_text, norm_intro = " ".join(text.split()).lower(), " ".join(words).lower()
+    # Сравниваем без учёта переносов строк и до границы слова («запиши» не должно срезать «запишите»)
+    if words and norm_text.startswith(norm_intro) and not norm_text[len(norm_intro) : len(norm_intro) + 1].isalnum():
+        parts = text.split(maxsplit=len(words))  # хвост — с исходными переносами строк
+        text = parts[len(words)].lstrip(" :—–-\n") if len(parts) > len(words) else ""
+    return strip_create_prefix(text) or strip_create_prefix(original)

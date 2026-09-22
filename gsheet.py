@@ -92,7 +92,8 @@ def index_row(idea: Idea, tab: str, tab_id: int) -> list[str]:
 
 
 def index_format_requests(sheet_id: int) -> list[dict]:
-    """Сводка: жирная закреплённая шапка, перенос текста."""
+    """Сводка: жирная закреплённая шапка, перенос текста, колонка «Дата» — как дата.
+    Применяется при каждом старте (идемпотентно), так что новое форматирование доезжает и до старых таблиц."""
     return [
         {
             "updateSheetProperties": {
@@ -112,6 +113,14 @@ def index_format_requests(sheet_id: int) -> list[dict]:
                 "range": {"sheetId": sheet_id},
                 "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP", "verticalAlignment": "TOP"}},
                 "fields": "userEnteredFormat(wrapStrategy,verticalAlignment)",
+            }
+        },
+        {
+            # Дата пишется строкой «2026-09-21», Sheets превращает её в число дней — без формата так и покажет число
+            "repeatCell": {
+                "range": {"sheetId": sheet_id, "startRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 1},
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"}}},
+                "fields": "userEnteredFormat.numberFormat",
             }
         },
     ]
@@ -221,9 +230,8 @@ class IdeasSheet:
         sheets = self._sheets()
         index = sheets[0]
         self.index_id = index["sheetId"]
-        if self._values(f"{_q(index['title'])}!1:1"):
-            return
-        self._write(f"{_q(index['title'])}!A1", [INDEX_HEADERS], "RAW")
+        if not self._values(f"{_q(index['title'])}!1:1"):
+            self._write(f"{_q(index['title'])}!A1", [INDEX_HEADERS], "RAW")
         self._batch(index_format_requests(index["sheetId"]))
 
     def append_idea(self, idea: Idea) -> str:
@@ -239,11 +247,13 @@ class IdeasSheet:
         self._write(f"{_q(tab)}!A1", rows, "RAW")
         self._batch(card_format_requests(tab_id, len(rows)))
 
+        # OVERWRITE, а не INSERT_ROWS: вставленная строка наследует формат предыдущей,
+        # и первая идея получала жирный шрифт шапки, а от неё — все следующие
         self.svc.spreadsheets().values().append(
             spreadsheetId=self.id,
             range=f"{_q(index['title'])}!A1",
             valueInputOption="USER_ENTERED",
-            insertDataOption="INSERT_ROWS",
+            insertDataOption="OVERWRITE",
             body={"values": [index_row(idea, tab, tab_id)]},
         ).execute()
         return self.tab_url(tab_id)

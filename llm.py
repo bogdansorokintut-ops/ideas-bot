@@ -83,19 +83,24 @@ def _as_str(value) -> str:
     return " ".join(str(value).split()) if value is not None else ""
 
 
-async def enrich(idea: Idea, text: str) -> Idea:
+async def enrich(idea: Idea, text: str) -> bool:
+    """Дозаполняет пустые поля карточки на месте. False — LLM не ответил (лимит, сеть, мусор в ответе)."""
     try:
         data = await ask_json(SYSTEM, text)
     except Exception as exc:
         logging.warning("LLM недоступен, карточка без дополнения: %s", exc)
-        return idea
+        return False
+    if not data:
+        logging.warning("LLM вернул не JSON, карточка без дополнения")
+        return False
 
     for name in FIELDS:
         if not getattr(idea, name) and data.get(name):
             setattr(idea, name, _as_str(data[name]))
 
-    # Название берём у LLM, только если парсер его обрезал из длинной строки
-    if idea.title.endswith("…") and data.get("title"):
+    # Название берём у LLM, только если парсер его придумал сам (в тексте не было строки с названием)
+    if idea.auto_title and data.get("title"):
         idea.title = _as_str(data["title"])
+        idea.auto_title = False
 
-    return idea
+    return True

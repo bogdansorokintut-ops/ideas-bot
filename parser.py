@@ -67,16 +67,22 @@ def _absorb(idea: Idea, lines: list[str]) -> None:
             idea.extras[key] = f"{idea.extras[key]} {value}".strip() if key in idea.extras else value
 
 
+def _cut_title(line: str) -> str:
+    return line[: MAX_TITLE - 1].rsplit(" ", 1)[0] + "…" if len(line) > MAX_TITLE else line
+
+
 def _new_idea(lines: list[str], author: str, raw: str) -> Idea:
-    first, rest = lines[0], lines[1:]
+    first = lines[0]
     if _is_title(first):
         idea = Idea(title=first, author=author, raw=raw)
-    else:
-        # Длинная первая строка — это не название, а сама идея
-        cut = first[: MAX_TITLE - 1].rsplit(" ", 1)[0] + "…" if len(first) > MAX_TITLE else first
-        idea = Idea(title=cut, author=author, raw=raw)
-        rest = [first, *rest]
-    _absorb(idea, rest)
+        _absorb(idea, lines[1:])
+        return idea
+    # Строки с названием нет: блок начинается с самой идеи или с метки («Игроков: 4–8» —
+    # например, если название осталось в предыдущем куске разрезанного сообщения).
+    # Название режем из первой свободной строки, не из метки; LLM потом подберёт нормальное.
+    text_line = next((line for line in lines if _split_label(line) is None), first)
+    idea = Idea(title=_cut_title(text_line), author=author, raw=raw, auto_title=True)
+    _absorb(idea, lines)
     return idea
 
 
