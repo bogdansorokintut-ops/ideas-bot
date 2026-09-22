@@ -3,9 +3,11 @@ import html
 import logging
 import os
 import re
+import socket
 import uuid
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ChatType, ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -366,13 +368,23 @@ async def on_cancel(cb: CallbackQuery):
     await cb.answer()
 
 
+def _telegram_session() -> AiohttpSession:
+    """Сессия до Telegram: только IPv4 (в контейнерах IPv6 часто объявлен, но не ходит),
+    таймаут 60с, и опциональный прокси через TELEGRAM_PROXY (http://… или socks5://…)."""
+    session = AiohttpSession(proxy=os.getenv("TELEGRAM_PROXY") or None, timeout=60)
+    session._connector_init["family"] = socket.AF_INET
+    if os.getenv("TELEGRAM_PROXY"):
+        log.info("Telegram через прокси %s", os.environ["TELEGRAM_PROXY"].split("@")[-1])
+    return session
+
+
 async def main():
     try:
         await asyncio.to_thread(sheet.ensure_headers)
     except Exception as exc:
         raise SystemExit(f"Нет доступа к таблице: {exc}") from exc
     log.info("таблица доступна: %s", sheet.url)
-    bot = Bot(BOT_TOKEN)
+    bot = Bot(BOT_TOKEN, session=_telegram_session())
     # Сеть до Telegram из контейнера бывает медленной: одиночный вызов на старте не должен ронять бота.
     # Сам polling внутри aiogram переживает сетевые ошибки и повторяет запросы.
     for attempt in range(1, 6):

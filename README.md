@@ -145,6 +145,7 @@ python bot.py
    - `GOOGLE_CREDENTIALS_JSON` — содержимое `credentials.json` в base64 (или сырой JSON одной строкой)
    - `ALLOWED_USERS`
    - `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` — если нужен LLM
+   - `TELEGRAM_PROXY` — только если в логах `Telegram не отвечает` (сеть хостинга до api.telegram.org)
 3. Точка входа — `bot.py`. Зависимости ставятся из `requirements.txt` автоматически.
 4. Остановить локальную копию — два экземпляра одного бота дублируют ответы и сыплют `TelegramConflictError`.
    Проверить, что кто-то поллит: `curl https://api.telegram.org/bot<TOKEN>/getWebhookInfo` → `pending_update_count` должен быть 0.
