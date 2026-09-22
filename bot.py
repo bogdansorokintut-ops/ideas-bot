@@ -373,9 +373,17 @@ async def main():
         raise SystemExit(f"Нет доступа к таблице: {exc}") from exc
     log.info("таблица доступна: %s", sheet.url)
     bot = Bot(BOT_TOKEN)
-    await bot.delete_webhook()  # на случай, если раньше стоял webhook
-    me = await bot.me()
-    log.info("запускаю polling как @%s", me.username)
+    # Сеть до Telegram из контейнера бывает медленной: одиночный вызов на старте не должен ронять бота.
+    # Сам polling внутри aiogram переживает сетевые ошибки и повторяет запросы.
+    for attempt in range(1, 6):
+        try:
+            await bot.delete_webhook(request_timeout=30)  # на случай, если раньше стоял webhook
+            me = await bot.me()
+            log.info("запускаю polling как @%s", me.username)
+            break
+        except Exception as exc:
+            log.warning("Telegram не отвечает (попытка %d/5): %s", attempt, exc)
+            await asyncio.sleep(5 * attempt)
     await dp.start_polling(bot)
 
 
